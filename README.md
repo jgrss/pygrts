@@ -6,7 +6,7 @@
 
 # pygrts is a library for geospatial sampling
 
-Use `pygrts` to generate random samples that are spatially balanced using the Generalized Random Tessellation Stratified (GRTS) method.
+Use `pygrts` to generate spatially balanced random samples using the Generalized Random Tessellation Stratified (GRTS) method.
 
 #### What is GRTS?
 
