@@ -1,10 +1,10 @@
 [![](https://img.shields.io/badge/License-MIT-black.svg)](https://lbesson.mit-license.org/)
 [![python](https://img.shields.io/badge/Python-3.7%20%7C%203.8%20%7C%203.9-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
-[![](https://img.shields.io/github/v/release/jgrss/geosample?display_name=release)](https://github.com/jgrss/geosample/releases)
+[![](https://img.shields.io/github/v/release/jgrss/pygrts?display_name=release)](https://github.com/jgrss/pygrts/releases)
 
-# GeoSample is a library for geospatial sampling
+# pygrts is a library for geospatial sampling
 
-Use GeoSample to generate random samples that are spatially balanced using the Generalized Random Tessellation Stratified (GRTS) method.
+Use `pygrts` to generate random samples that are spatially balanced using the Generalized Random Tessellation Stratified (GRTS) method.
 
 #### What is GRTS?
 
@@ -26,7 +26,7 @@ Use GeoSample to generate random samples that are spatially balanced using the G
 # Basic example
 
 ```python
->>> from geosample import QuadTree
+>>> from pygrts import QuadTree
 >>> import geopandas as gpd
 >>>
 >>> samples = gpd.read_file('samples.gpkg')
