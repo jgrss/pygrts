@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from geosample import MapSamples
+from pygrts import MapSamples
 
 
 class TestMap(unittest.TestCase):

@@ -4,8 +4,7 @@ import geopandas as gpd
 import numpy as np
 from shapely.geometry import Point
 
-from geosample import QuadTree
-from geosample.tree import GRTSFrame
+from pygrts import QuadTree
 
 DATA1 = np.array(
     [
