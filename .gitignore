@@ -21,9 +21,4 @@ dist/
 .ipynb_checkpoints
 __pycache__/
 
-# GeoWombat
-old/
-envs/
-doc/*.log
-doc/source/*.log
-
+.vscode/
