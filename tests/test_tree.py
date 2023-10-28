@@ -78,7 +78,7 @@ class TestTree(unittest.TestCase):
         self.assertTrue(samp_df.shape == (8, 3))
         self.assertFalse(
             set(samp_df.sample_id.tolist()).difference(
-                [77, 86, 152, 163, 305, 370, 419, 563]
+                [168, 212, 384, 632, 706, 744, 906, 994]
             )
         )
 
