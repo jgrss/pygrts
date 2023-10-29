@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from pyproj import CRS
 from scipy.spatial import cKDTree
-from shapely.geometry import Polygon, box
+from shapely.geometry import Point, Polygon, box
 from sklearn.cluster import KMeans
 
 BBox = namedtuple('BBox', 'left bottom right top')
@@ -54,6 +54,16 @@ class TreeMixin(ABC):
         """
         return box(*bounds)
 
+    def intersection(self, geometry: Polygon) -> T.List[int]:
+        """Gets the intersection of a polygon geometry."""
+        return list(self.sindex.intersection(geometry))
+
+    def iter_samples(
+        self, df_sample: gpd.GeoDataFrame
+    ) -> T.Tuple[Point, T.List[int]]:
+        for row in df_sample.itertuples():
+            yield row.geometry, list(self.sindex.query(row.geometry))
+
     @abstractmethod
     def to_geom(self):
         pass
@@ -67,8 +77,8 @@ class QuadTree(TreeMixin):
     """A class to generate a QuadTree.
 
     Args:
-        dataframe (DataFrame)
-        force_square (Optional[bool])
+        dataframe (GeoDataFrame): The ``geopandas.GeoDataFrame`` with data samples.
+        force_square (Optional[bool]): Whether to force square quadrants. Default is ``True``.
     """
 
     def __init__(self, dataframe: gpd.GeoDataFrame, force_square: bool = True):
@@ -166,7 +176,7 @@ class QuadTree(TreeMixin):
 
         return self.bounds_to_tuple(frame)
 
-    def to_geom(self) -> T.Sequence[Polygon]:
+    def to_geom(self) -> T.List[Polygon]:
         """Converts quadrant bounds to geometry."""
         return [self.create_poly(bbox) for bbox in self.tree_bounds]
 
@@ -182,9 +192,9 @@ class QuadTree(TreeMixin):
     @property
     def counts(self) -> T.Dict[str, int]:
         """Get counts of sample occurrences in each quadrant."""
-        counts = {}
+        counts: T.Dict[str, int] = {}
         for i, geom in zip(self.tree_ids, self.tree):
-            point_int = list(self.sindex.intersection(geom.bounds))
+            point_int = self.intersection(geom.bounds)
             if point_int:
                 counts[i] = len(point_int)
 
@@ -205,7 +215,7 @@ class QuadTree(TreeMixin):
         )
 
         # Get points that intersect the quadrant
-        point_int = list(self.sindex.intersection(bbox))
+        point_int = self.intersection(bbox)
 
         return len(point_int) if point_int else 0
 
@@ -243,7 +253,7 @@ class QuadTree(TreeMixin):
             }
 
             for qid, bbox in qdict.items():
-                id_list = list(self.sindex.intersection(bbox))
+                id_list = self.intersection(bbox)
                 if id_list:
                     if len(id_list) > thresh:
                         new_tree_bounds.append(bbox)
@@ -468,13 +478,11 @@ class QuadTree(TreeMixin):
                 ),
             )
 
-        sample_indices: T.Sequence[int] = []
+        sample_indices: T.List[int] = []
         # Iterate over the selected grids,
         # get intersecting samples, and
         # select 1 sample within each grid.
-        for row in df_sample.itertuples():
-            # Points that intersect the current grid
-            qsamples = list(self.sindex.query(row.geometry))
+        for row_geometry, qsamples in self.iter_samples(df_sample):
             rng.shuffle(qsamples)
 
             if strata_column is not None:
@@ -498,7 +506,7 @@ class QuadTree(TreeMixin):
                     data=qsamples,
                     columns=['sample_index'],
                 )
-                distance_weights = row.geometry.exterior.distance(
+                distance_weights = row_geometry.exterior.distance(
                     self.dataframe.iloc[qsamples].geometry
                 )
                 distance_weights = (
