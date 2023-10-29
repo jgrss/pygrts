@@ -1,5 +1,5 @@
 [![](https://img.shields.io/badge/License-MIT-black.svg)](https://lbesson.mit-license.org/)
-[![python](https://img.shields.io/badge/Python-3.7%20%7C%203.8%20%7C%203.9-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
+[![python](https://img.shields.io/badge/Python-3.8%20%7C%203.9%20%7C%203.10-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
 [![](https://img.shields.io/github/v/release/jgrss/pygrts?display_name=release)](https://github.com/jgrss/pygrts/releases)
 [![](https://github.com/jgrss/pygrts/actions/workflows/ci.yml/badge.svg)](https://github.com/jgrss/pygrts/actions/)
 [![](https://img.shields.io/github/repo-size/jgrss/pygrts)](https://shields.io/category/size)
@@ -7,6 +7,8 @@
 # pygrts is a library for geospatial sampling
 
 Use `pygrts` to generate spatially balanced random samples using the Generalized Random Tessellation Stratified (GRTS) method.
+
+![](data/grts_hierarchy.png)
 
 #### What is GRTS?
 
@@ -28,12 +30,12 @@ Use `pygrts` to generate spatially balanced random samples using the Generalized
 # Basic example
 
 ```python
->>> from pygrts import QuadTree
+>>> import pygrts
 >>> import geopandas as gpd
 >>>
 >>> samples = gpd.read_file('samples.gpkg')
 >>>
->>> qt = QuadTree(samples)
+>>> qt = pygrts.QuadTree(samples)
 >>>
 >>> # Split until the quadrants are less than 5,000 meters
 >>> qt.split_recursive(max_length=5000)
@@ -63,7 +65,7 @@ Use `pygrts` to generate spatially balanced random samples using the Generalized
 ## Split the tree recursively
 
 ```python
->>> qt = QuadTree(df)
+>>> qt = pygrts.QuadTree(df)
 >>>
 >>> for i in range(0, 4):
 >>>     qt.split()
@@ -74,14 +76,14 @@ Use `pygrts` to generate spatially balanced random samples using the Generalized
 ## Split until maximum number of points in each quadrant
 
 ```python
->>> qt = QuadTree(df)
+>>> qt = pygrts.QuadTree(df)
 >>> qt.split_recursive(max_samples=100)
 ```
 
 ![](data/grts_fig3.png)
 
 ```python
->>> qt = QuadTree(df)
+>>> qt = pygrts.QuadTree(df)
 >>> qt.split_recursive(max_samples=50)
 ```
 
@@ -90,7 +92,7 @@ Use `pygrts` to generate spatially balanced random samples using the Generalized
 ## Split until maximum quadrant length
 
 ```python
->>> qt = QuadTree(df)
+>>> qt = pygrts.QuadTree(df)
 >>> qt.split_recursive(max_length=5000)
 ```
 
@@ -101,7 +103,7 @@ Use `pygrts` to generate spatially balanced random samples using the Generalized
 ## Generalized Random Tessellation Stratified (GRTS)
 
 ```python
->>> qt = QuadTree(df)
+>>> qt = pygrts.QuadTree(df)
 >>> qt.split_recursive(max_length=10000)
 >>> n_samples = 20
 >>>
@@ -123,7 +125,7 @@ Use `pygrts` to generate spatially balanced random samples using the Generalized
 ## Generalized Random Tessellation Stratified (GRTS) with cluster center weights
 
 ```python
->>> qt = QuadTree(df)
+>>> qt = pygrts.QuadTree(df)
 >>> qt.split_recursive(max_length=10000)
 >>> n_samples = 20
 >>>
