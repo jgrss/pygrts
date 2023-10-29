@@ -1,13 +1,13 @@
 import typing as T
 from abc import ABC, abstractmethod
-from collections import defaultdict, namedtuple
+from collections import Counter, namedtuple
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 from pyproj import CRS
 from scipy.spatial import cKDTree
-from shapely.geometry import Polygon, box
+from shapely.geometry import Point, Polygon, box
 from sklearn.cluster import KMeans
 
 BBox = namedtuple('BBox', 'left bottom right top')
@@ -54,6 +54,16 @@ class TreeMixin(ABC):
         """
         return box(*bounds)
 
+    def intersection(self, geometry: Polygon) -> T.List[int]:
+        """Gets the intersection of a polygon geometry."""
+        return list(self.sindex.intersection(geometry))
+
+    def iter_samples(
+        self, df_sample: gpd.GeoDataFrame
+    ) -> T.Tuple[Point, T.List[int]]:
+        for row in df_sample.itertuples():
+            yield row.geometry, list(self.sindex.query(row.geometry))
+
     @abstractmethod
     def to_geom(self):
         pass
@@ -67,8 +77,8 @@ class QuadTree(TreeMixin):
     """A class to generate a QuadTree.
 
     Args:
-        dataframe (DataFrame)
-        force_square (Optional[bool])
+        dataframe (GeoDataFrame): The ``geopandas.GeoDataFrame`` with data samples.
+        force_square (Optional[bool]): Whether to force square quadrants. Default is ``True``.
     """
 
     def __init__(self, dataframe: gpd.GeoDataFrame, force_square: bool = True):
@@ -166,7 +176,7 @@ class QuadTree(TreeMixin):
 
         return self.bounds_to_tuple(frame)
 
-    def to_geom(self) -> T.Sequence[Polygon]:
+    def to_geom(self) -> T.List[Polygon]:
         """Converts quadrant bounds to geometry."""
         return [self.create_poly(bbox) for bbox in self.tree_bounds]
 
@@ -182,9 +192,9 @@ class QuadTree(TreeMixin):
     @property
     def counts(self) -> T.Dict[str, int]:
         """Get counts of sample occurrences in each quadrant."""
-        counts = {}
+        counts: T.Dict[str, int] = {}
         for i, geom in zip(self.tree_ids, self.tree):
-            point_int = list(self.sindex.intersection(geom.bounds))
+            point_int = self.intersection(geom.bounds)
             if point_int:
                 counts[i] = len(point_int)
 
@@ -205,7 +215,7 @@ class QuadTree(TreeMixin):
         )
 
         # Get points that intersect the quadrant
-        point_int = list(self.sindex.intersection(bbox))
+        point_int = self.intersection(bbox)
 
         return len(point_int) if point_int else 0
 
@@ -220,8 +230,8 @@ class QuadTree(TreeMixin):
             thresh (int): The sample threshold to remove a quadrant. Default is 0, or remove a
                 quadrant if it is empty.
         """
-        new_tree_bounds = []
-        new_tree_ids = []
+        new_tree_bounds: T.List[namedtuple] = []
+        new_tree_ids: T.List[str] = []
 
         self.contains_null = False
 
@@ -243,7 +253,7 @@ class QuadTree(TreeMixin):
             }
 
             for qid, bbox in qdict.items():
-                id_list = list(self.sindex.intersection(bbox))
+                id_list = self.intersection(bbox)
                 if id_list:
                     if len(id_list) > thresh:
                         new_tree_bounds.append(bbox)
@@ -373,10 +383,48 @@ class QuadTree(TreeMixin):
 
         return qt_frame
 
+    def weight_upsample(
+        self, grid_df: gpd.GeoDataFrame, weight_method: str
+    ) -> gpd.GeoDataFrame:
+        # Add quadrant counts
+        grid_df = grid_df.merge(
+            (
+                pd.DataFrame(self.counts, index=['qcounts'])
+                .T.rename_axis(index=ID_COLUMN)
+                .reset_index()
+            ),
+            on=ID_COLUMN,
+        )
+        oversample = np.array(1.0 / (grid_df.qcounts / grid_df.qcounts.max()))
+        over_df: T.Sequence[pd.DataFrame] = []
+        for over_val in np.unique(oversample):
+            if weight_method == 'inverse-density':
+                if over_val > 1:
+                    repeated_index = grid_df.index[
+                        np.where(oversample == over_val)
+                    ].repeat(int(over_val))
+                    over_df.append(grid_df.loc[repeated_index])
+            else:
+                if over_val > 2:
+                    repeated_index = grid_df.index[
+                        np.where(oversample == over_val)
+                    ].repeat(1)
+                    over_df.append(grid_df.loc[repeated_index])
+
+        if over_df:
+            grid_df = pd.concat((grid_df, pd.concat(over_df)))
+            grid_df = grid_df.sort_values(by=ID_COLUMN)
+
+        return grid_df
+
     def sample(
         self,
         n: int = 1,
-        weight_method: str = None,
+        samples_per_grid: int = 1,
+        strata_column: T.Optional[str] = None,
+        weight_method: T.Optional[str] = None,
+        weight_sample_by_distance: bool = False,
+        multiply_distance_weights_by: float = 1.0,
         random_state: T.Optional[int] = None,
         rng: T.Optional[np.random.Generator] = None,
         **kwargs,
@@ -385,9 +433,14 @@ class QuadTree(TreeMixin):
         Random Tessellation Stratified (GRTS) method.
 
         Args:
-            n (int): The target sample size.
-            weight_method (Optional[str]): Choices are ['density-factor', 'inverse-density', 'cluster'].
-            random_state (Optional[int])
+            n (int): The target grid sample size (i.e., the number of grids).
+            samples_per_grid (int): The number of samples per grid.
+            strata_column (Optional[str]): A columne to stratify samples by.
+            weight_method (Optional[str]): The grid weight method.
+                Choices are ['density-factor', 'inverse-density', 'cluster'].
+            weight_sample_by_distance (bool): Whether to weight samples by distance from grid edge.
+            multiply_distance_weights_by (float): A multiplicative value to apply to distance weights.
+            random_state (Optional[int]): A random state for the random number generator.
             kwargs (Optional[dict]): Keyword arguments for ``self.weight_grids``.
 
         Returns:
@@ -397,51 +450,26 @@ class QuadTree(TreeMixin):
             rng = np.random.default_rng(random_state)
 
         if weight_method == 'cluster':
-            df = self.weight_grids(**kwargs)
+            grid_df = self.weight_grids(**kwargs)
         else:
-            df = self.to_frame()
+            grid_df = self.to_frame()
 
         # Base 4 reverse sorting
-        df = df.sort_values(by=ID_COLUMN)
-        if weight_method in ('density-factor', 'inverse-density'):
-            # Add quadrant counts
-            df = df.merge(
-                (
-                    pd.DataFrame(self.counts, index=['qcounts'])
-                    .T.rename_axis(index=ID_COLUMN)
-                    .reset_index()
-                ),
-                on=ID_COLUMN,
-            )
-            oversample = np.array(1.0 / (df.qcounts / df.qcounts.max()))
-            over_df: T.Sequence[pd.DataFrame] = []
-            for over_val in np.unique(oversample):
-                if weight_method == 'inverse-density':
-                    if over_val > 1:
-                        repeated_index = df.index[
-                            np.where(oversample == over_val)
-                        ].repeat(int(over_val))
-                        over_df.append(df.loc[repeated_index])
-                else:
-                    if over_val > 2:
-                        repeated_index = df.index[
-                            np.where(oversample == over_val)
-                        ].repeat(1)
-                        over_df.append(df.loc[repeated_index])
+        grid_df = grid_df.sort_values(by=ID_COLUMN)
+        if weight_method in (
+            'density-factor',
+            'inverse-density',
+        ):
+            self.weight_upsample(grid_df, weight_method)
 
-            if over_df:
-                df = pd.concat((df, pd.concat(over_df)))
-                df = df.sort_values(by=ID_COLUMN)
+        npool = len(grid_df.index)
+        df_sample = grid_df.iloc[:: int(np.ceil(npool / n))]
 
-        npool = len(df.index)
-        df_sample = df.iloc[:: int(np.ceil(npool / n))]
-        df_sample = df_sample.drop_duplicates(subset=[ID_COLUMN])
-
-        if n > 0.5 * len(df):
+        if n > 0.5 * len(grid_df.index):
             df_sample = pd.concat(
                 (
                     df_sample,
-                    df.query(
+                    grid_df.query(
                         f"uid != {df_sample[ID_COLUMN].values.tolist()}"
                     ).sample(
                         n=n - len(df_sample.index),
@@ -450,23 +478,61 @@ class QuadTree(TreeMixin):
                 ),
             )
 
-        sample_indices: T.Sequence[int] = []
+        sample_indices: T.List[int] = []
         # Iterate over the selected grids,
         # get intersecting samples, and
         # select 1 sample within each grid.
-        for row in df_sample.itertuples():
-            # Points that intersect the current grid
-            qsamples = list(self.sindex.query(row.geometry))
-            # Get one random point within the grid
-            while qsamples:
-                q = rng.choice(qsamples)
-                if q not in sample_indices:
-                    sample_indices.append(q)
-                    break
-                qsamples.remove(q)
+        for row_geometry, qsamples in self.iter_samples(df_sample):
+            rng.shuffle(qsamples)
+
+            if strata_column is not None:
+                qdf = pd.DataFrame(
+                    data=np.c_[
+                        qsamples, self.dataframe.iloc[qsamples][strata_column]
+                    ],
+                    columns=['sample_index', strata_column],
+                )
+                qsamples = (
+                    qdf.groupby(strata_column, group_keys=False).apply(
+                        lambda x: x.sample(
+                            min(samples_per_grid, len(x.index)),
+                            replace=False,
+                            random_state=rng.integers(low=0, high=100_000),
+                        )
+                    )
+                ).sample_index.tolist()
+            elif weight_sample_by_distance:
+                qdf = pd.DataFrame(
+                    data=qsamples,
+                    columns=['sample_index'],
+                )
+                distance_weights = row_geometry.exterior.distance(
+                    self.dataframe.iloc[qsamples].geometry
+                )
+                distance_weights = (
+                    1.0 - (distance_weights / distance_weights.max())
+                ).clip(0.1, 1)
+                distance_weights *= multiply_distance_weights_by
+                distance_weights /= distance_weights.sum()
+
+                qsamples = qdf.sample(
+                    n=samples_per_grid,
+                    replace=False,
+                    weights=distance_weights.values,
+                    random_state=rng.integers(low=0, high=100_000),
+                ).sample_index.tolist()
+            else:
+                qsamples = qsamples[:samples_per_grid]
+
+            sample_indices.extend(qsamples)
+
+        sample_indices = np.array(
+            sorted(list(set(sample_indices))),
+            dtype='int64',
+        )
 
         # Get the random points
-        return self.dataframe.iloc[np.array(sample_indices)]
+        return self.dataframe.iloc[sample_indices]
 
 
 class Rtree(TreeMixin):
