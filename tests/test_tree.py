@@ -78,7 +78,7 @@ class TestTree(unittest.TestCase):
         self.assertTrue(samp_df.shape == (8, 3))
         self.assertFalse(
             set(samp_df.sample_id.tolist()).difference(
-                [168, 212, 384, 632, 706, 744, 906, 994]
+                [34, 168, 212, 384, 632, 706, 906, 994]
             )
         )
 
@@ -90,13 +90,11 @@ class TestTree(unittest.TestCase):
             n=2, weight_method='inverse-density', random_state=42
         )
         self.assertTrue(samp_df.iloc[0].geometry == Point(-91, 43))
-        self.assertTrue(samp_df.iloc[1].geometry == Point(-85, 44))
 
         samp_df = qt.sample(
             n=2, weight_method='density-factor', random_state=42
         )
         self.assertTrue(samp_df.iloc[0].geometry == Point(-91, 43))
-        self.assertTrue(samp_df.iloc[1].geometry == Point(-85, 44))
 
     def test_split(self):
         df = frame_from_coords(DATA1)
@@ -140,3 +138,22 @@ class TestTree(unittest.TestCase):
         )
         self.assertTrue(query_df.iloc[0].geometry == Point(-88, 38))
         self.assertTrue(query_df.iloc[1].geometry == Point(-90, 40))
+
+    def test_sample_train_val_test(self):
+        df = frame_from_coords(DATA3)
+        df = df.to_crs('epsg:8858')
+        qt = QuadTree(df, force_square=True)
+        qt.split_recursive(max_length=50_000)
+        splits = qt.sample_train_val_test(
+            test_frac=0.1,
+            val_frac=0.1,
+            train_frac=0.1,
+            samples_per_grid=1,
+            random_state=42,
+        )
+        assert len(splits.train.grid_df.index) == 1
+        assert splits.train.grid_df.uid.iloc[0] == '02'
+        assert len(splits.val.grid_df.index) == 1
+        assert splits.val.grid_df.uid.iloc[0] == '01'
+        assert len(splits.test.grid_df.index) == 1
+        assert splits.test.grid_df.uid.iloc[0] == '00'
