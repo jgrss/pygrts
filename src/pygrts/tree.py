@@ -1,6 +1,7 @@
 import typing as T
 from abc import ABC, abstractmethod
-from collections import Counter, namedtuple
+from collections import namedtuple
+from dataclasses import dataclass
 
 import geopandas as gpd
 import numpy as np
@@ -31,6 +32,26 @@ class GRTSFrame:
         df = df.assign(point_distance=distances)
 
         return df
+
+
+class SampleSplit:
+    def __init__(self, grid_df: gpd.GeoDataFrame, point_df: gpd.GeoDataFrame):
+        self.grid_df = grid_df
+        self.point_df = point_df
+
+    @classmethod
+    def set_splits(cls, grid_df: gpd.GeoDataFrame, point_df: gpd.GeoDataFrame):
+        return cls(
+            grid_df=grid_df,
+            point_df=point_df,
+        )
+
+
+@dataclass
+class Splits:
+    train: SampleSplit
+    val: SampleSplit
+    test: SampleSplit
 
 
 class TreeMixin(ABC):
@@ -417,38 +438,11 @@ class QuadTree(TreeMixin):
 
         return grid_df
 
-    def sample(
+    def _preprocess_grid(
         self,
-        n: int = 1,
-        samples_per_grid: int = 1,
-        strata_column: T.Optional[str] = None,
-        weight_method: T.Optional[str] = None,
-        weight_sample_by_distance: bool = False,
-        multiply_distance_weights_by: float = 1.0,
-        random_state: T.Optional[int] = None,
-        rng: T.Optional[np.random.Generator] = None,
+        weight_method: str,
         **kwargs,
-    ):
-        """Samples from the hierarchical grid address using the Generalized
-        Random Tessellation Stratified (GRTS) method.
-
-        Args:
-            n (int): The target grid sample size (i.e., the number of grids).
-            samples_per_grid (int): The number of samples per grid.
-            strata_column (Optional[str]): A columne to stratify samples by.
-            weight_method (Optional[str]): The grid weight method.
-                Choices are ['density-factor', 'inverse-density', 'cluster'].
-            weight_sample_by_distance (bool): Whether to weight samples by distance from grid edge.
-            multiply_distance_weights_by (float): A multiplicative value to apply to distance weights.
-            random_state (Optional[int]): A random state for the random number generator.
-            kwargs (Optional[dict]): Keyword arguments for ``self.weight_grids``.
-
-        Returns:
-            ``geopandas.GeoDataFrame``
-        """
-        if rng is None:
-            rng = np.random.default_rng(random_state)
-
+    ) -> gpd.GeoDataFrame:
         if weight_method == 'cluster':
             grid_df = self.weight_grids(**kwargs)
         else:
@@ -460,11 +454,21 @@ class QuadTree(TreeMixin):
             'density-factor',
             'inverse-density',
         ):
-            self.weight_upsample(grid_df, weight_method)
+            grid_df = self.weight_upsample(grid_df, weight_method)
 
-        npool = len(grid_df.index)
-        df_sample = grid_df.iloc[:: int(np.ceil(npool / n))]
+        return grid_df.copy()
 
+    def _sample_grids(
+        self,
+        grid_df: gpd.GeoDataFrame,
+        df_sample: gpd.GeoDataFrame,
+        n: int,
+        samples_per_grid: int,
+        rng: np.random.Generator,
+        strata_column: T.Union[None, str],
+        weight_sample_by_distance: bool,
+        multiply_distance_weights_by: float,
+    ) -> gpd.GeoDataFrame:
         if n > 0.5 * len(grid_df.index):
             df_sample = pd.concat(
                 (
@@ -533,6 +537,187 @@ class QuadTree(TreeMixin):
 
         # Get the random points
         return self.dataframe.iloc[sample_indices]
+
+    @staticmethod
+    def _get_skip(df: gpd.GeoDataFrame, n: int) -> int:
+        num_grids = len(df.index)
+        return int(np.ceil(num_grids / n))
+
+    def sample_split(
+        self,
+        df: gpd.GeoDataFrame,
+        n: int,
+        samples_per_grid: int,
+        rng: np.random.Generator,
+        strata_column: T.Union[None, str],
+        weight_sample_by_distance: bool,
+        multiply_distance_weights_by: float,
+        seed_start: bool = True,
+    ) -> gpd.GeoDataFrame:
+        if seed_start:
+            base4_skip = self._get_skip(df, n=n)
+            start_seed = rng.choice(range(0, base4_skip))
+            df = df.iloc[start_seed:]
+
+        base4_skip = self._get_skip(df, n=n)
+        grid_df_sample = df.iloc[::base4_skip]
+        samples_df = self._sample_grids(
+            grid_df=df,
+            df_sample=grid_df_sample,
+            n=n,
+            samples_per_grid=samples_per_grid,
+            rng=rng,
+            strata_column=strata_column,
+            weight_sample_by_distance=weight_sample_by_distance,
+            multiply_distance_weights_by=multiply_distance_weights_by,
+        )
+
+        return grid_df_sample, samples_df
+
+    def sample_train_val_test(
+        self,
+        test_frac: float,
+        val_frac: float,
+        train_frac: float,
+        samples_per_grid: int = 1,
+        strata_column: T.Optional[str] = None,
+        weight_method: T.Optional[str] = None,
+        weight_sample_by_distance: bool = False,
+        multiply_distance_weights_by: float = 1.0,
+        random_state: T.Optional[int] = None,
+        rng: T.Optional[np.random.Generator] = None,
+        **kwargs,
+    ) -> Splits:
+        """Samples train, validation, and test splits from the hierarchical
+        grid address using the Generalized Random Tessellation Stratified
+        (GRTS) method.
+
+        Args:
+            test_frac (float): The fraction of grids to sample for testing.
+            val_frac (float): The fraction of grids to sample for validation.
+            train_frac (float): The fraction of grids to sample for training.
+            samples_per_grid (int): The number of samples per grid.
+            strata_column (Optional[str]): A columne to stratify samples by.
+            weight_method (Optional[str]): The grid weight method.
+                Choices are ['density-factor', 'inverse-density', 'cluster'].
+            weight_sample_by_distance (bool): Whether to weight samples by distance from grid edge.
+            multiply_distance_weights_by (float): A multiplicative value to apply to distance weights.
+            random_state (Optional[int]): A random state for the random number generator.
+            kwargs (Optional[dict]): Keyword arguments for ``self.weight_grids``.
+
+        Returns:
+            An ``object`` with train, validation, and test splits.
+        """
+        if rng is None:
+            rng = np.random.default_rng(random_state)
+
+        grid_df = self._preprocess_grid(weight_method=weight_method, **kwargs)
+
+        test_n = int(len(grid_df.index) * test_frac)
+        test_grid_df, test_samples_df = self.sample_split(
+            df=grid_df,
+            n=test_n,
+            samples_per_grid=samples_per_grid,
+            rng=rng,
+            strata_column=strata_column,
+            weight_sample_by_distance=weight_sample_by_distance,
+            multiply_distance_weights_by=multiply_distance_weights_by,
+            seed_start=False,
+        )
+
+        # Remove test samples
+        grid_df = grid_df.query(
+            f"{ID_COLUMN} != {test_grid_df[ID_COLUMN].tolist()}"
+        )
+        val_n = int(len(grid_df.index) * val_frac)
+        val_grid_df, val_samples_df = self.sample_split(
+            df=grid_df,
+            n=val_n,
+            samples_per_grid=samples_per_grid,
+            rng=rng,
+            strata_column=strata_column,
+            weight_sample_by_distance=weight_sample_by_distance,
+            multiply_distance_weights_by=multiply_distance_weights_by,
+            seed_start=False,
+        )
+
+        # Remove validation samples
+        grid_df = grid_df.query(
+            f"{ID_COLUMN} != {val_grid_df[ID_COLUMN].tolist()}"
+        )
+        train_n = int(len(grid_df.index) * train_frac)
+        train_grid_df, train_samples_df = self.sample_split(
+            df=grid_df,
+            n=train_n,
+            samples_per_grid=samples_per_grid,
+            rng=rng,
+            strata_column=strata_column,
+            weight_sample_by_distance=weight_sample_by_distance,
+            multiply_distance_weights_by=multiply_distance_weights_by,
+            seed_start=False,
+        )
+
+        return Splits(
+            train=SampleSplit.set_splits(
+                grid_df=train_grid_df,
+                point_df=train_samples_df,
+            ),
+            val=SampleSplit.set_splits(
+                grid_df=val_grid_df,
+                point_df=val_samples_df,
+            ),
+            test=SampleSplit.set_splits(
+                grid_df=test_grid_df,
+                point_df=test_samples_df,
+            ),
+        )
+
+    def sample(
+        self,
+        n: int = 1,
+        samples_per_grid: int = 1,
+        strata_column: T.Optional[str] = None,
+        weight_method: T.Optional[str] = None,
+        weight_sample_by_distance: bool = False,
+        multiply_distance_weights_by: float = 1.0,
+        random_state: T.Optional[int] = None,
+        rng: T.Optional[np.random.Generator] = None,
+        **kwargs,
+    ):
+        """Samples from the hierarchical grid address using the Generalized
+        Random Tessellation Stratified (GRTS) method.
+
+        Args:
+            n (int): The target grid sample size (i.e., the number of grids).
+            samples_per_grid (int): The number of samples per grid.
+            strata_column (Optional[str]): A columne to stratify samples by.
+            weight_method (Optional[str]): The grid weight method.
+                Choices are ['density-factor', 'inverse-density', 'cluster'].
+            weight_sample_by_distance (bool): Whether to weight samples by distance from grid edge.
+            multiply_distance_weights_by (float): A multiplicative value to apply to distance weights.
+            random_state (Optional[int]): A random state for the random number generator.
+            kwargs (Optional[dict]): Keyword arguments for ``self.weight_grids``.
+
+        Returns:
+            ``geopandas.GeoDataFrame``
+        """
+        if rng is None:
+            rng = np.random.default_rng(random_state)
+
+        grid_df = self._preprocess_grid(weight_method=weight_method, **kwargs)
+
+        _, samples_df = self.sample_split(
+            df=grid_df,
+            n=n,
+            samples_per_grid=samples_per_grid,
+            rng=rng,
+            strata_column=strata_column,
+            weight_sample_by_distance=weight_sample_by_distance,
+            multiply_distance_weights_by=multiply_distance_weights_by,
+            seed_start=True,
+        )
+
+        return samples_df
 
 
 class Rtree(TreeMixin):
