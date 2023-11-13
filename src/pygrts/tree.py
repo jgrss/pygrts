@@ -464,6 +464,7 @@ class QuadTree(TreeMixin):
         df_sample: gpd.GeoDataFrame,
         n: int,
         samples_per_grid: int,
+        strata_samples_per_grid: T.Union[None, dict],
         rng: np.random.Generator,
         strata_column: T.Union[None, str],
         weight_sample_by_distance: bool,
@@ -496,15 +497,30 @@ class QuadTree(TreeMixin):
                     ],
                     columns=['sample_index', strata_column],
                 )
+
+                if strata_samples_per_grid is not None:
+
+                    def stratified_sample(x):
+                        return min(
+                            strata_samples_per_grid[x[strata_column].iloc[0]],
+                            len(x.index),
+                        )
+
+                else:
+
+                    def stratified_sample(x):
+                        return min(samples_per_grid, len(x.index))
+
                 qsamples = (
                     qdf.groupby(strata_column, group_keys=False).apply(
                         lambda x: x.sample(
-                            min(samples_per_grid, len(x.index)),
+                            stratified_sample(x),
                             replace=False,
                             random_state=rng.integers(low=0, high=100_000),
                         )
                     )
                 ).sample_index.tolist()
+
             elif weight_sample_by_distance:
                 qdf = pd.DataFrame(
                     data=qsamples,
@@ -548,6 +564,7 @@ class QuadTree(TreeMixin):
         df: gpd.GeoDataFrame,
         n: int,
         samples_per_grid: int,
+        strata_samples_per_grid: T.Union[None, dict],
         rng: np.random.Generator,
         strata_column: T.Union[None, str],
         weight_sample_by_distance: bool,
@@ -566,6 +583,7 @@ class QuadTree(TreeMixin):
             df_sample=grid_df_sample,
             n=n,
             samples_per_grid=samples_per_grid,
+            strata_samples_per_grid=strata_samples_per_grid,
             rng=rng,
             strata_column=strata_column,
             weight_sample_by_distance=weight_sample_by_distance,
@@ -580,6 +598,7 @@ class QuadTree(TreeMixin):
         val_frac: float,
         train_frac: float,
         samples_per_grid: int = 1,
+        strata_samples_per_grid: T.Optional[T.Dict[int, int]] = None,
         strata_column: T.Optional[str] = None,
         weight_method: T.Optional[str] = None,
         weight_sample_by_distance: bool = False,
@@ -596,7 +615,12 @@ class QuadTree(TreeMixin):
             test_frac (float): The fraction of grids to sample for testing.
             val_frac (float): The fraction of grids to sample for validation.
             train_frac (float): The fraction of grids to sample for training.
-            samples_per_grid (int): The number of samples per grid.
+            samples_per_grid (int): The number of samples per grid. Ignored if
+                'strata_samples_per_grid' is not ``None`` and 'strata_column' is not ``None``.
+            strata_samples_per_grid (Optional[dict]): A dictionary of strata samples.
+                E.g., strata_samples_per_grid = {1: 10, 2: 5} would attempt to sample
+                10 samples per grid for class 1 and 5 samples per grid for class 2. Only applied
+                when 'strata_column' is not ``None``.
             strata_column (Optional[str]): A columne to stratify samples by.
             weight_method (Optional[str]): The grid weight method.
                 Choices are ['density-factor', 'inverse-density', 'cluster'].
@@ -618,6 +642,7 @@ class QuadTree(TreeMixin):
             df=grid_df,
             n=test_n,
             samples_per_grid=samples_per_grid,
+            strata_samples_per_grid=strata_samples_per_grid,
             rng=rng,
             strata_column=strata_column,
             weight_sample_by_distance=weight_sample_by_distance,
@@ -634,6 +659,7 @@ class QuadTree(TreeMixin):
             df=grid_df,
             n=val_n,
             samples_per_grid=samples_per_grid,
+            strata_samples_per_grid=strata_samples_per_grid,
             rng=rng,
             strata_column=strata_column,
             weight_sample_by_distance=weight_sample_by_distance,
@@ -650,6 +676,7 @@ class QuadTree(TreeMixin):
             df=grid_df,
             n=train_n,
             samples_per_grid=samples_per_grid,
+            strata_samples_per_grid=strata_samples_per_grid,
             rng=rng,
             strata_column=strata_column,
             weight_sample_by_distance=weight_sample_by_distance,
@@ -676,6 +703,7 @@ class QuadTree(TreeMixin):
         self,
         n: int = 1,
         samples_per_grid: int = 1,
+        strata_samples_per_grid: T.Optional[T.Dict[int, int]] = None,
         strata_column: T.Optional[str] = None,
         weight_method: T.Optional[str] = None,
         weight_sample_by_distance: bool = False,
@@ -689,7 +717,12 @@ class QuadTree(TreeMixin):
 
         Args:
             n (int): The target grid sample size (i.e., the number of grids).
-            samples_per_grid (int): The number of samples per grid.
+            samples_per_grid (int): The number of samples per grid. Ignored if
+                'strata_samples_per_grid' is not ``None`` and 'strata_column' is not ``None``.
+            strata_samples_per_grid (Optional[dict]): A dictionary of strata samples.
+                E.g., strata_samples_per_grid = {1: 10, 2: 5} would attempt to sample
+                10 samples per grid for class 1 and 5 samples per grid for class 2. Only applied
+                when 'strata_column' is not ``None``.
             strata_column (Optional[str]): A columne to stratify samples by.
             weight_method (Optional[str]): The grid weight method.
                 Choices are ['density-factor', 'inverse-density', 'cluster'].
@@ -710,6 +743,7 @@ class QuadTree(TreeMixin):
             df=grid_df,
             n=n,
             samples_per_grid=samples_per_grid,
+            strata_samples_per_grid=strata_samples_per_grid,
             rng=rng,
             strata_column=strata_column,
             weight_sample_by_distance=weight_sample_by_distance,
