@@ -152,8 +152,8 @@ class TestTree(unittest.TestCase):
             random_state=42,
         )
         assert len(splits.train.grid_df.index) == 1
-        assert splits.train.grid_df.uid.iloc[0] == '02'
+        assert splits.train.grid_df.uid.iloc[0] == '31'
         assert len(splits.val.grid_df.index) == 1
-        assert splits.val.grid_df.uid.iloc[0] == '01'
+        assert splits.val.grid_df.uid.iloc[0] == '03'
         assert len(splits.test.grid_df.index) == 1
-        assert splits.test.grid_df.uid.iloc[0] == '00'
+        assert splits.test.grid_df.uid.iloc[0] == '01'

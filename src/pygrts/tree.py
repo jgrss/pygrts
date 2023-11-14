@@ -49,9 +49,9 @@ class SampleSplit:
 
 @dataclass
 class Splits:
-    train: SampleSplit
-    val: SampleSplit
-    test: SampleSplit
+    train: SampleSplit = None
+    val: SampleSplit = None
+    test: SampleSplit = None
 
 
 class TreeMixin(ABC):
@@ -220,6 +220,13 @@ class QuadTree(TreeMixin):
                 counts[i] = len(point_int)
 
         return counts
+
+    def counts_to_frame(self) -> gpd.GeoDataFrame:
+        return (
+            pd.DataFrame(self.counts, index=['qcounts'])
+            .T.rename_axis(index=ID_COLUMN)
+            .reset_index()
+        )
 
     def count(self, qid: str) -> int:
         """Counts sample occurrences in a quadrant.
@@ -404,18 +411,10 @@ class QuadTree(TreeMixin):
 
         return qt_frame
 
+    @staticmethod
     def weight_upsample(
-        self, grid_df: gpd.GeoDataFrame, weight_method: str
+        grid_df: gpd.GeoDataFrame, weight_method: str
     ) -> gpd.GeoDataFrame:
-        # Add quadrant counts
-        grid_df = grid_df.merge(
-            (
-                pd.DataFrame(self.counts, index=['qcounts'])
-                .T.rename_axis(index=ID_COLUMN)
-                .reset_index()
-            ),
-            on=ID_COLUMN,
-        )
         oversample = np.array(1.0 / (grid_df.qcounts / grid_df.qcounts.max()))
         over_df: T.Sequence[pd.DataFrame] = []
         for over_val in np.unique(oversample):
@@ -441,12 +440,21 @@ class QuadTree(TreeMixin):
     def _preprocess_grid(
         self,
         weight_method: str,
+        grid_df: T.Optional[gpd.GeoDataFrame] = None,
         **kwargs,
     ) -> gpd.GeoDataFrame:
-        if weight_method == 'cluster':
-            grid_df = self.weight_grids(**kwargs)
-        else:
-            grid_df = self.to_frame()
+        if grid_df is None:
+            if weight_method == 'cluster':
+                grid_df = self.weight_grids(**kwargs)
+            else:
+                grid_df = self.to_frame()
+
+            if 'qcounts' not in grid_df.columns:
+                # Add quadrant counts
+                grid_df = grid_df.merge(
+                    self.counts_to_frame(),
+                    on=ID_COLUMN,
+                )
 
         # Base 4 reverse sorting
         grid_df = grid_df.sort_values(by=ID_COLUMN)
@@ -464,6 +472,7 @@ class QuadTree(TreeMixin):
         df_sample: gpd.GeoDataFrame,
         n: int,
         samples_per_grid: int,
+        strata_samples_per_grid: T.Union[None, dict],
         rng: np.random.Generator,
         strata_column: T.Union[None, str],
         weight_sample_by_distance: bool,
@@ -496,15 +505,30 @@ class QuadTree(TreeMixin):
                     ],
                     columns=['sample_index', strata_column],
                 )
+
+                if strata_samples_per_grid is not None:
+
+                    def stratified_sample(x):
+                        return min(
+                            strata_samples_per_grid[x[strata_column].iloc[0]],
+                            len(x.index),
+                        )
+
+                else:
+
+                    def stratified_sample(x):
+                        return min(samples_per_grid, len(x.index))
+
                 qsamples = (
                     qdf.groupby(strata_column, group_keys=False).apply(
                         lambda x: x.sample(
-                            min(samples_per_grid, len(x.index)),
+                            stratified_sample(x),
                             replace=False,
                             random_state=rng.integers(low=0, high=100_000),
                         )
                     )
                 ).sample_index.tolist()
+
             elif weight_sample_by_distance:
                 qdf = pd.DataFrame(
                     data=qsamples,
@@ -520,7 +544,7 @@ class QuadTree(TreeMixin):
                 distance_weights /= distance_weights.sum()
 
                 qsamples = qdf.sample(
-                    n=samples_per_grid,
+                    n=min(samples_per_grid, len(qdf.index)),
                     replace=False,
                     weights=distance_weights.values,
                     random_state=rng.integers(low=0, high=100_000),
@@ -548,6 +572,7 @@ class QuadTree(TreeMixin):
         df: gpd.GeoDataFrame,
         n: int,
         samples_per_grid: int,
+        strata_samples_per_grid: T.Union[None, dict],
         rng: np.random.Generator,
         strata_column: T.Union[None, str],
         weight_sample_by_distance: bool,
@@ -566,6 +591,7 @@ class QuadTree(TreeMixin):
             df_sample=grid_df_sample,
             n=n,
             samples_per_grid=samples_per_grid,
+            strata_samples_per_grid=strata_samples_per_grid,
             rng=rng,
             strata_column=strata_column,
             weight_sample_by_distance=weight_sample_by_distance,
@@ -574,12 +600,94 @@ class QuadTree(TreeMixin):
 
         return grid_df_sample, samples_df
 
+    def split_kfold(
+        self,
+        n_splits: int = 5,
+        samples_per_grid: int = 1,
+        strata_samples_per_grid: T.Optional[T.Dict[int, int]] = None,
+        strata_column: T.Optional[str] = None,
+        weight_method: T.Optional[str] = None,
+        weight_sample_by_distance: bool = False,
+        multiply_distance_weights_by: float = 1.0,
+        random_state: T.Optional[int] = None,
+        rng: T.Optional[np.random.Generator] = None,
+        **kwargs,
+    ):
+        """K-folds cross-validator."""
+        if rng is None:
+            rng = np.random.default_rng(random_state)
+
+        full_grid_df = self.to_frame().copy()
+        # Add quadrant counts
+        full_grid_df = full_grid_df.merge(
+            self.counts_to_frame(),
+            on=ID_COLUMN,
+        )
+        reduce_grid = full_grid_df.copy()
+
+        all_df = []
+
+        split_size = int(len(self) / n_splits)
+        for split_idx in range(0, n_splits):
+            # On the first split, sample from all grids.
+            # On subsequent splits, do not include the grid test splits.
+            grid_df = self._preprocess_grid(
+                weight_method=weight_method, grid_df=reduce_grid, **kwargs
+            )
+            # Get the test split
+            test_split_grid_df, test_split_points_df = self.sample_split(
+                df=grid_df,
+                n=split_size,
+                samples_per_grid=samples_per_grid,
+                strata_samples_per_grid=strata_samples_per_grid,
+                rng=rng,
+                strata_column=strata_column,
+                weight_sample_by_distance=weight_sample_by_distance,
+                multiply_distance_weights_by=multiply_distance_weights_by,
+                seed_start=False,
+            )
+            # Get train split -- i.e., all grids that are not in the test split
+            train_split_grid_df = full_grid_df.query(
+                f"{ID_COLUMN} != {test_split_grid_df[ID_COLUMN].tolist()}"
+            ).reset_index(drop=True)
+            train_split_points_df = self.dataframe.loc[
+                ~self.dataframe.index.isin(test_split_points_df.index)
+            ].reset_index(drop=True)
+
+            if train_split_grid_df[ID_COLUMN].duplicated().any():
+                raise ValueError('There was train id duplication.')
+            if test_split_grid_df[ID_COLUMN].duplicated().any():
+                raise ValueError('There was test id duplication.')
+            if (
+                test_split_grid_df[ID_COLUMN]
+                .isin(train_split_grid_df[ID_COLUMN])
+                .any()
+            ):
+                raise ValueError('There was test leakage into train splits.')
+
+            # Remove the test grids from subsequent splits
+            reduce_grid = reduce_grid.query(
+                f"{ID_COLUMN} != {test_split_grid_df[ID_COLUMN].tolist()}"
+            ).reset_index(drop=True)
+
+            yield Splits(
+                train=SampleSplit.set_splits(
+                    grid_df=train_split_grid_df.copy(),
+                    point_df=train_split_points_df.copy(),
+                ),
+                test=SampleSplit.set_splits(
+                    grid_df=test_split_grid_df.copy(),
+                    point_df=test_split_points_df.copy(),
+                ),
+            )
+
     def sample_train_val_test(
         self,
         test_frac: float,
         val_frac: float,
         train_frac: float,
         samples_per_grid: int = 1,
+        strata_samples_per_grid: T.Optional[T.Dict[int, int]] = None,
         strata_column: T.Optional[str] = None,
         weight_method: T.Optional[str] = None,
         weight_sample_by_distance: bool = False,
@@ -596,7 +704,12 @@ class QuadTree(TreeMixin):
             test_frac (float): The fraction of grids to sample for testing.
             val_frac (float): The fraction of grids to sample for validation.
             train_frac (float): The fraction of grids to sample for training.
-            samples_per_grid (int): The number of samples per grid.
+            samples_per_grid (int): The number of samples per grid. Ignored if
+                'strata_samples_per_grid' is not ``None`` and 'strata_column' is not ``None``.
+            strata_samples_per_grid (Optional[dict]): A dictionary of strata samples.
+                E.g., strata_samples_per_grid = {1: 10, 2: 5} would attempt to sample
+                10 samples per grid for class 1 and 5 samples per grid for class 2. Only applied
+                when 'strata_column' is not ``None``.
             strata_column (Optional[str]): A columne to stratify samples by.
             weight_method (Optional[str]): The grid weight method.
                 Choices are ['density-factor', 'inverse-density', 'cluster'].
@@ -618,11 +731,12 @@ class QuadTree(TreeMixin):
             df=grid_df,
             n=test_n,
             samples_per_grid=samples_per_grid,
+            strata_samples_per_grid=strata_samples_per_grid,
             rng=rng,
             strata_column=strata_column,
             weight_sample_by_distance=weight_sample_by_distance,
             multiply_distance_weights_by=multiply_distance_weights_by,
-            seed_start=False,
+            seed_start=True,
         )
 
         # Remove test samples
@@ -634,11 +748,12 @@ class QuadTree(TreeMixin):
             df=grid_df,
             n=val_n,
             samples_per_grid=samples_per_grid,
+            strata_samples_per_grid=strata_samples_per_grid,
             rng=rng,
             strata_column=strata_column,
             weight_sample_by_distance=weight_sample_by_distance,
             multiply_distance_weights_by=multiply_distance_weights_by,
-            seed_start=False,
+            seed_start=True,
         )
 
         # Remove validation samples
@@ -650,11 +765,12 @@ class QuadTree(TreeMixin):
             df=grid_df,
             n=train_n,
             samples_per_grid=samples_per_grid,
+            strata_samples_per_grid=strata_samples_per_grid,
             rng=rng,
             strata_column=strata_column,
             weight_sample_by_distance=weight_sample_by_distance,
             multiply_distance_weights_by=multiply_distance_weights_by,
-            seed_start=False,
+            seed_start=True,
         )
 
         return Splits(
@@ -676,6 +792,7 @@ class QuadTree(TreeMixin):
         self,
         n: int = 1,
         samples_per_grid: int = 1,
+        strata_samples_per_grid: T.Optional[T.Dict[int, int]] = None,
         strata_column: T.Optional[str] = None,
         weight_method: T.Optional[str] = None,
         weight_sample_by_distance: bool = False,
@@ -689,7 +806,12 @@ class QuadTree(TreeMixin):
 
         Args:
             n (int): The target grid sample size (i.e., the number of grids).
-            samples_per_grid (int): The number of samples per grid.
+            samples_per_grid (int): The number of samples per grid. Ignored if
+                'strata_samples_per_grid' is not ``None`` and 'strata_column' is not ``None``.
+            strata_samples_per_grid (Optional[dict]): A dictionary of strata samples.
+                E.g., strata_samples_per_grid = {1: 10, 2: 5} would attempt to sample
+                10 samples per grid for class 1 and 5 samples per grid for class 2. Only applied
+                when 'strata_column' is not ``None``.
             strata_column (Optional[str]): A columne to stratify samples by.
             weight_method (Optional[str]): The grid weight method.
                 Choices are ['density-factor', 'inverse-density', 'cluster'].
@@ -710,6 +832,7 @@ class QuadTree(TreeMixin):
             df=grid_df,
             n=n,
             samples_per_grid=samples_per_grid,
+            strata_samples_per_grid=strata_samples_per_grid,
             rng=rng,
             strata_column=strata_column,
             weight_sample_by_distance=weight_sample_by_distance,
