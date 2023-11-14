@@ -49,9 +49,9 @@ class SampleSplit:
 
 @dataclass
 class Splits:
-    train: SampleSplit
-    val: SampleSplit
-    test: SampleSplit
+    train: SampleSplit = None
+    val: SampleSplit = None
+    test: SampleSplit = None
 
 
 class TreeMixin(ABC):
@@ -536,7 +536,7 @@ class QuadTree(TreeMixin):
                 distance_weights /= distance_weights.sum()
 
                 qsamples = qdf.sample(
-                    n=samples_per_grid,
+                    n=min(samples_per_grid, len(qdf.index)),
                     replace=False,
                     weights=distance_weights.values,
                     random_state=rng.integers(low=0, high=100_000),
@@ -591,6 +591,60 @@ class QuadTree(TreeMixin):
         )
 
         return grid_df_sample, samples_df
+
+    def split_kfold(
+        self,
+        n_splits: int = 5,
+        samples_per_grid: int = 1,
+        strata_samples_per_grid: T.Optional[T.Dict[int, int]] = None,
+        strata_column: T.Optional[str] = None,
+        weight_method: T.Optional[str] = None,
+        weight_sample_by_distance: bool = False,
+        multiply_distance_weights_by: float = 1.0,
+        random_state: T.Optional[int] = None,
+        rng: T.Optional[np.random.Generator] = None,
+        **kwargs,
+    ):
+        """K-folds cross-validator."""
+        if rng is None:
+            rng = np.random.default_rng(random_state)
+
+        grid_df = self._preprocess_grid(weight_method=weight_method, **kwargs)
+        full_grid_df = grid_df.copy()
+
+        split_size = int(len(self) / n_splits)
+        for split_idx in range(0, n_splits):
+            test_split_grid_df, test_split_points_df = self.sample_split(
+                df=grid_df,
+                n=split_size,
+                samples_per_grid=samples_per_grid,
+                strata_samples_per_grid=strata_samples_per_grid,
+                rng=rng,
+                strata_column=strata_column,
+                weight_sample_by_distance=weight_sample_by_distance,
+                multiply_distance_weights_by=multiply_distance_weights_by,
+                seed_start=True,
+            )
+            # Get train split
+            train_split_grid_df = full_grid_df.query(
+                f"{ID_COLUMN} != {test_split_grid_df[ID_COLUMN].tolist()}"
+            )
+            train_split_points_df = self.dataframe.loc[
+                ~self.dataframe.index.isin(test_split_points_df.index)
+            ]
+            # Remove grid split from subsequent samples
+            grid_df = train_split_grid_df.copy()
+
+            yield Splits(
+                train=SampleSplit.set_splits(
+                    grid_df=train_split_grid_df.copy(),
+                    point_df=train_split_points_df.copy(),
+                ),
+                test=SampleSplit.set_splits(
+                    grid_df=test_split_grid_df.copy(),
+                    point_df=test_split_points_df.copy(),
+                ),
+            )
 
     def sample_train_val_test(
         self,
@@ -647,7 +701,7 @@ class QuadTree(TreeMixin):
             strata_column=strata_column,
             weight_sample_by_distance=weight_sample_by_distance,
             multiply_distance_weights_by=multiply_distance_weights_by,
-            seed_start=False,
+            seed_start=True,
         )
 
         # Remove test samples
@@ -664,7 +718,7 @@ class QuadTree(TreeMixin):
             strata_column=strata_column,
             weight_sample_by_distance=weight_sample_by_distance,
             multiply_distance_weights_by=multiply_distance_weights_by,
-            seed_start=False,
+            seed_start=True,
         )
 
         # Remove validation samples
@@ -681,7 +735,7 @@ class QuadTree(TreeMixin):
             strata_column=strata_column,
             weight_sample_by_distance=weight_sample_by_distance,
             multiply_distance_weights_by=multiply_distance_weights_by,
-            seed_start=False,
+            seed_start=True,
         )
 
         return Splits(
