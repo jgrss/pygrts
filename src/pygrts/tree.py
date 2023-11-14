@@ -221,6 +221,13 @@ class QuadTree(TreeMixin):
 
         return counts
 
+    def counts_to_frame(self) -> gpd.GeoDataFrame:
+        return (
+            pd.DataFrame(self.counts, index=['qcounts'])
+            .T.rename_axis(index=ID_COLUMN)
+            .reset_index()
+        )
+
     def count(self, qid: str) -> int:
         """Counts sample occurrences in a quadrant.
 
@@ -404,18 +411,10 @@ class QuadTree(TreeMixin):
 
         return qt_frame
 
+    @staticmethod
     def weight_upsample(
-        self, grid_df: gpd.GeoDataFrame, weight_method: str
+        grid_df: gpd.GeoDataFrame, weight_method: str
     ) -> gpd.GeoDataFrame:
-        # Add quadrant counts
-        grid_df = grid_df.merge(
-            (
-                pd.DataFrame(self.counts, index=['qcounts'])
-                .T.rename_axis(index=ID_COLUMN)
-                .reset_index()
-            ),
-            on=ID_COLUMN,
-        )
         oversample = np.array(1.0 / (grid_df.qcounts / grid_df.qcounts.max()))
         over_df: T.Sequence[pd.DataFrame] = []
         for over_val in np.unique(oversample):
@@ -441,12 +440,21 @@ class QuadTree(TreeMixin):
     def _preprocess_grid(
         self,
         weight_method: str,
+        grid_df: T.Optional[gpd.GeoDataFrame] = None,
         **kwargs,
     ) -> gpd.GeoDataFrame:
-        if weight_method == 'cluster':
-            grid_df = self.weight_grids(**kwargs)
-        else:
-            grid_df = self.to_frame()
+        if grid_df is None:
+            if weight_method == 'cluster':
+                grid_df = self.weight_grids(**kwargs)
+            else:
+                grid_df = self.to_frame()
+
+            if 'qcounts' not in grid_df.columns:
+                # Add quadrant counts
+                grid_df = grid_df.merge(
+                    self.counts_to_frame(),
+                    on=ID_COLUMN,
+                )
 
         # Base 4 reverse sorting
         grid_df = grid_df.sort_values(by=ID_COLUMN)
@@ -609,11 +617,24 @@ class QuadTree(TreeMixin):
         if rng is None:
             rng = np.random.default_rng(random_state)
 
-        grid_df = self._preprocess_grid(weight_method=weight_method, **kwargs)
-        full_grid_df = grid_df.copy()
+        full_grid_df = self.to_frame().copy()
+        # Add quadrant counts
+        full_grid_df = full_grid_df.merge(
+            self.counts_to_frame(),
+            on=ID_COLUMN,
+        )
+        reduce_grid = full_grid_df.copy()
+
+        all_df = []
 
         split_size = int(len(self) / n_splits)
         for split_idx in range(0, n_splits):
+            # On the first split, sample from all grids.
+            # On subsequent splits, do not include the grid test splits.
+            grid_df = self._preprocess_grid(
+                weight_method=weight_method, grid_df=reduce_grid, **kwargs
+            )
+            # Get the test split
             test_split_grid_df, test_split_points_df = self.sample_split(
                 df=grid_df,
                 n=split_size,
@@ -623,17 +644,31 @@ class QuadTree(TreeMixin):
                 strata_column=strata_column,
                 weight_sample_by_distance=weight_sample_by_distance,
                 multiply_distance_weights_by=multiply_distance_weights_by,
-                seed_start=True,
+                seed_start=False,
             )
-            # Get train split
+            # Get train split -- i.e., all grids that are not in the test split
             train_split_grid_df = full_grid_df.query(
                 f"{ID_COLUMN} != {test_split_grid_df[ID_COLUMN].tolist()}"
-            )
+            ).reset_index(drop=True)
             train_split_points_df = self.dataframe.loc[
                 ~self.dataframe.index.isin(test_split_points_df.index)
-            ]
-            # Remove grid split from subsequent samples
-            grid_df = train_split_grid_df.copy()
+            ].reset_index(drop=True)
+
+            if train_split_grid_df[ID_COLUMN].duplicated().any():
+                raise ValueError('There was train id duplication.')
+            if test_split_grid_df[ID_COLUMN].duplicated().any():
+                raise ValueError('There was test id duplication.')
+            if (
+                test_split_grid_df[ID_COLUMN]
+                .isin(train_split_grid_df[ID_COLUMN])
+                .any()
+            ):
+                raise ValueError('There was test leakage into train splits.')
+
+            # Remove the test grids from subsequent splits
+            reduce_grid = reduce_grid.query(
+                f"{ID_COLUMN} != {test_split_grid_df[ID_COLUMN].tolist()}"
+            ).reset_index(drop=True)
 
             yield Splits(
                 train=SampleSplit.set_splits(
