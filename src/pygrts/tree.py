@@ -315,34 +315,32 @@ class QuadTree(TreeMixin):
                 recursive splitting.
 
         Preference:
-            first_null > max_length > max_samples > min_samples
+            first_null > max_length > max_samples
         """
         if first_null:
             max_length = None
             max_samples = None
 
-        elif isinstance(max_length, float) or isinstance(max_length, int):
+        elif isinstance(max_length, (int, float)):
             first_null = False
             max_samples = None
 
         elif isinstance(max_samples, int):
-            if not isinstance(max_samples, int):
-                raise NameError('One of the four options must be chosen.')
-
             first_null = False
             max_length = None
 
-        old_count = 1e9
+        else:
+            raise NameError("Choose either max_length or max_samples.")
 
         while True:
             self.split(thresh=min_thresh)
 
-            if isinstance(max_length, float) or isinstance(max_length, int):
-                if self.qmax <= max_length:
+            if first_null:
+                if self.contains_null:
                     break
 
-            elif first_null:
-                if self.contains_null:
+            elif isinstance(max_length, (int, float)):
+                if self.qmax <= max_length:
                     break
 
             elif isinstance(max_samples, int):
@@ -350,11 +348,6 @@ class QuadTree(TreeMixin):
 
                 if max_count <= max_samples:
                     break
-
-                if max_count == old_count:
-                    break
-
-                old_count = max_count
 
     def weight_grids(
         self, n_clusters: int = 10, num_results: int = 2
